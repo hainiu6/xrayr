@@ -1,0 +1,54 @@
+name: Test and release installer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xrayr-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check installer and regression tests
+        run: |
+          bash -n install-xrayr.sh
+          python3 qa/test_install.py
+          git diff --check
+      - name: Build and check official binary packages
+        run: python3 tools/build_release.py
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(cat VERSION)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo 'This release version already belongs to a different commit. Bump VERSION and the installer release URL.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "XrayR native installer $tag" \
+              --notes 'Native XrayR v0.9.4 installer for Debian/Ubuntu x86_64 and ARM64. No Docker. Certificate files are checked for existence only. Includes binaries, matching upstream source and checksums. See README for installation and service commands.'
+          fi
+          gh release upload "$tag" dist/* --clobber
+          gh release edit "$tag" --draft=false --latest
+      - name: Verify the published downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir downloaded
+          gh release download "$(cat VERSION)" --dir downloaded
+          (cd downloaded && sha256sum -c SHA256SUMS-XrayR.txt)
+          cmp install-xrayr.sh downloaded/install-xrayr.sh
+          tar -tzf downloaded/xrayr-native-installer.tar.gz
